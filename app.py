@@ -37,8 +37,11 @@ def optimize_meals(df, target_cals, target_p, target_f, target_c, max_servings=2
     
     prob = pulp.LpProblem("Macro_Optimizer", pulp.LpMinimize)
     
-    # Pass the standard Python list to PuLP
-    food_vars = pulp.LpVariable.dicts("Food", valid_indices, lowBound=0, upBound=max_servings, cat='Integer')
+    # Use dictionary comprehension instead of LpVariable.dicts to avoid the AttributeError
+    food_vars = {
+        i: pulp.LpVariable(f"Food_{i}", lowBound=0, upBound=max_servings, cat='Integer')
+        for i in valid_indices
+    }
     
     total_cals = pulp.lpSum([df.loc[i, 'Calories'] * food_vars[i] for i in valid_indices])
     total_p = pulp.lpSum([df.loc[i, 'Protein'] * food_vars[i] for i in valid_indices])
