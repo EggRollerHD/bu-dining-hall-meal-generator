@@ -1,5 +1,5 @@
 streamlit
 pandas
-pulp
+pulp==3.3.2
 requests
 beautifulsoup4
