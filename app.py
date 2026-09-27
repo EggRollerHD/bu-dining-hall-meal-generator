@@ -4,44 +4,97 @@ import pulp
 import requests
 from bs4 import BeautifulSoup
 
-# --- 1. DATA EXTRACTION (Web Scraping) ---
-@st.cache_data 
+# --- 1. DATA EXTRACTION (Real Web Scraper) ---
+@st.cache_data(ttl=3600) # Caches the live data for 1 hour so it doesn't overload BU servers
 def scrape_dining_hall(url):
-    """
-    Template for scraping BU Dining menus. 
-    Note: If BU's tables load dynamically via JavaScript, replace requests with Playwright.
-    """
-    # Example structure of what your parsed DataFrame will look like:
-    mock_data = {
-        "Item": ["Scrambled Eggs", "Oatmeal", "Grilled Chicken", "Rice", "Broccoli", "Salmon", "Almond Milk", "Cheese Pizza"],
-        "Meal": ["Breakfast", "Breakfast", "Lunch", "Lunch", "Lunch", "Dinner", "Breakfast", "Dinner"],
-        "Calories": [140, 150, 165, 205, 50, 200, 60, 285],
-        "Protein": [12, 5, 31, 4, 3, 22, 1, 12],
-        "Fat": [10, 2.5, 3.5, 0.5, 0, 11, 2.5, 10],
-        "Carbs": [1, 27, 0, 45, 10, 0, 8, 36],
-        "Ingredients": ["eggs, butter, dairy", "oats, water", "chicken, oil", "white rice", "broccoli", "salmon, fish", "almonds, water", "wheat, dairy, cheese"]
-    }
-    return pd.DataFrame(mock_data)
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        parsed_data = []
+        current_meal = "Lunch" # Default fallback
+        
+        # Parse standard HTML structures for college dining menus
+        for element in soup.find_all(['h3', 'h4', 'li', 'div'], class_=['meal-period', 'menu-item', 'menu-details', 'item-name']):
+            text = element.get_text(strip=True).lower()
+            
+            # Track which meal period we are currently parsing
+            if 'breakfast' in text: current_meal = 'Breakfast'
+            elif 'lunch' in text: current_meal = 'Lunch'
+            elif 'dinner' in text: current_meal = 'Dinner'
+            
+            # Extract item details
+            if 'menu-item' in element.get('class', []) or 'menu-details' in element.get('class', []):
+                try:
+                    name_elem = element.find(class_='item-name') or element.find('a')
+                    name = name_elem.get_text(strip=True) if name_elem else "Unknown Item"
+                    
+                    # Extract Macros (stripping out text like 'g' or 'kcal')
+                    cals = element.find(class_='calories')
+                    cals = int(''.join(filter(str.isdigit, cals.get_text()))) if cals else 0
+                    
+                    protein = element.find(class_='protein')
+                    protein = int(''.join(filter(str.isdigit, protein.get_text()))) if protein else 0
+                    
+                    fat = element.find(class_='fat') or element.find(class_='total-fat')
+                    fat = int(''.join(filter(str.isdigit, fat.get_text()))) if fat else 0
+                    
+                    carbs = element.find(class_='carbohydrates') or element.find(class_='total-carbs')
+                    carbs = int(''.join(filter(str.isdigit, carbs.get_text()))) if carbs else 0
+                    
+                    ingredients_elem = element.find(class_='ingredients')
+                    ingredients = ingredients_elem.get_text(strip=True).lower() if ingredients_elem else ""
+                    
+                    if name != "Unknown Item" and cals > 0:
+                        parsed_data.append({
+                            "Item": name,
+                            "Meal": current_meal,
+                            "Calories": cals,
+                            "Protein": protein,
+                            "Fat": fat,
+                            "Carbs": carbs,
+                            "Ingredients": ingredients
+                        })
+                except Exception:
+                    continue
+                    
+        df = pd.DataFrame(parsed_data)
+        
+        # Fallback if the live site uses JavaScript blocking or structure changes
+        if df.empty:
+            st.warning("Live scraping returned 0 items (HTML structure may have changed). Using fallback data to prevent crash.")
+            mock_data = {
+                "Item": ["Scrambled Eggs", "Oatmeal", "Grilled Chicken", "Rice", "Broccoli", "Salmon", "Almond Milk", "Cheese Pizza"],
+                "Meal": ["Breakfast", "Breakfast", "Lunch", "Lunch", "Lunch", "Dinner", "Breakfast", "Dinner"],
+                "Calories": [140, 150, 165, 205, 50, 200, 60, 285],
+                "Protein": [12, 5, 31, 4, 3, 22, 1, 12],
+                "Fat": [10, 2.5, 3.5, 0.5, 0, 11, 2.5, 10],
+                "Carbs": [1, 27, 0, 45, 10, 0, 8, 36],
+                "Ingredients": ["eggs, butter, dairy", "oats, water", "chicken, oil", "white rice", "broccoli", "salmon, fish", "almonds, water", "wheat, dairy, cheese"]
+            }
+            df = pd.DataFrame(mock_data)
+            
+        return df
+
+    except Exception as e:
+        st.error(f"Failed to fetch menu: {e}")
+        return pd.DataFrame()
 
 # --- 2. THE MATH ENGINE (Macro Optimization) ---
 def optimize_meals(df, target_cals, target_p, target_f, target_c, max_servings=2):
-    # Guard against empty data
     if df is None or df.empty:
         return pd.DataFrame()
         
-    # Reset the index to ensure clean, sequential integers without gaps
     df = df.reset_index(drop=True)
-    
-    # Convert the pandas index to a standard Python list
     valid_indices = df.index.tolist()
     
     prob = pulp.LpProblem("Macro_Optimizer", pulp.LpMinimize)
     
-    # Use dictionary comprehension instead of LpVariable.dicts to avoid the AttributeError
-    food_vars = {
-        i: pulp.LpVariable(f"Food_{i}", lowBound=0, upBound=max_servings, cat='Integer')
-        for i in valid_indices
-    }
+    # Restored to 3.x compatible syntax (Requires pulp==3.3.2 in requirements.txt)
+    food_vars = pulp.LpVariable.dicts("Food", valid_indices, lowBound=0, upBound=max_servings, cat='Integer')
     
     total_cals = pulp.lpSum([df.loc[i, 'Calories'] * food_vars[i] for i in valid_indices])
     total_p = pulp.lpSum([df.loc[i, 'Protein'] * food_vars[i] for i in valid_indices])
@@ -69,6 +122,7 @@ def optimize_meals(df, target_cals, target_p, target_f, target_c, max_servings=2
         if len(meal_items) > 0:
             prob += pulp.lpSum([food_vars[i] for i in meal_items]) >= 1
 
+    # This CBC command requires PuLP 3.x
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
     
     results = []
@@ -110,7 +164,7 @@ url_map = {
 }
 
 if st.button("Generate Meal Plan"):
-    with st.spinner('Scraping menu and running MILP solver...'):
+    with st.spinner('Scraping live menu and running MILP solver...'):
         menu_df = scrape_dining_hall(url_map[dining_hall])
         
         if exclusions:
