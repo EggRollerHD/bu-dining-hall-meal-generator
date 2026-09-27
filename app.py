@@ -5,16 +5,12 @@ import requests
 from bs4 import BeautifulSoup
 
 # --- 1. DATA EXTRACTION (Web Scraping) ---
-@st.cache_data # Caches the data so you don't scrape BU's servers on every button click
+@st.cache_data 
 def scrape_dining_hall(url):
     """
     Template for scraping BU Dining menus. 
     Note: If BU's tables load dynamically via JavaScript, replace requests with Playwright.
     """
-    # headers = {'User-Agent': 'Mozilla/5.0'}
-    # response = requests.get(url, headers=headers)
-    # soup = BeautifulSoup(response.text, 'html.parser')
-    
     # Example structure of what your parsed DataFrame will look like:
     mock_data = {
         "Item": ["Scrambled Eggs", "Oatmeal", "Grilled Chicken", "Rice", "Broccoli", "Salmon", "Almond Milk", "Cheese Pizza"],
@@ -29,52 +25,52 @@ def scrape_dining_hall(url):
 
 # --- 2. THE MATH ENGINE (Macro Optimization) ---
 def optimize_meals(df, target_cals, target_p, target_f, target_c, max_servings=2):
-    # Initialize the Linear Programming problem
-    # We use a minimization problem to minimize the difference between our targets and actuals
+    # Guard against empty data
+    if df is None or df.empty:
+        return pd.DataFrame()
+        
+    # Reset the index to ensure clean, sequential integers without gaps
+    df = df.reset_index(drop=True)
+    
+    # Convert the pandas index to a standard Python list
+    valid_indices = df.index.tolist()
+    
     prob = pulp.LpProblem("Macro_Optimizer", pulp.LpMinimize)
     
-    # Create variables for each food item (Integer: 0, 1, or 2 servings max)
-    food_vars = pulp.LpVariable.dicts("Food", df.index, lowBound=0, upBound=max_servings, cat='Integer')
+    # Pass the standard Python list to PuLP
+    food_vars = pulp.LpVariable.dicts("Food", valid_indices, lowBound=0, upBound=max_servings, cat='Integer')
     
-    # Calculate totals based on variable selection
-    total_cals = pulp.lpSum([df.loc[i, 'Calories'] * food_vars[i] for i in df.index])
-    total_p = pulp.lpSum([df.loc[i, 'Protein'] * food_vars[i] for i in df.index])
-    total_f = pulp.lpSum([df.loc[i, 'Fat'] * food_vars[i] for i in df.index])
-    total_c = pulp.lpSum([df.loc[i, 'Carbs'] * food_vars[i] for i in df.index])
+    total_cals = pulp.lpSum([df.loc[i, 'Calories'] * food_vars[i] for i in valid_indices])
+    total_p = pulp.lpSum([df.loc[i, 'Protein'] * food_vars[i] for i in valid_indices])
+    total_f = pulp.lpSum([df.loc[i, 'Fat'] * food_vars[i] for i in valid_indices])
+    total_c = pulp.lpSum([df.loc[i, 'Carbs'] * food_vars[i] for i in valid_indices])
     
-    # Slack variables (Allows the math to find a solution even if it's 5g off target)
     slack_cal = pulp.LpVariable("Slack_Cal", lowBound=0)
     slack_p = pulp.LpVariable("Slack_P", lowBound=0)
     
-    # Objective: Minimize deviation from caloric and protein targets
     prob += slack_cal + (slack_p * 10) 
     
-    # Constraints (Setting acceptable ranges)
     prob += total_cals - target_cals <= slack_cal
     prob += target_cals - total_cals <= slack_cal
     
     prob += total_p - target_p <= slack_p
     prob += target_p - total_p <= slack_p
     
-    # Hard constraints for Fat and Carbs (must be within +/- 10g)
     prob += total_f >= target_f - 10
     prob += total_f <= target_f + 10
     prob += total_c >= target_c - 15
     prob += total_c <= target_c + 15
 
-    # Enforce at least one item from each meal period
     for meal in ['Breakfast', 'Lunch', 'Dinner']:
-        meal_items = df[df['Meal'] == meal].index
+        meal_items = df[df['Meal'] == meal].index.tolist()
         if len(meal_items) > 0:
             prob += pulp.lpSum([food_vars[i] for i in meal_items]) >= 1
 
-    # Run the solver
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
     
-    # Compile results
     results = []
     if pulp.LpStatus[prob.status] == 'Optimal':
-        for i in df.index:
+        for i in valid_indices:
             if food_vars[i].varValue > 0:
                 results.append({
                     "Meal": df.loc[i, 'Meal'],
@@ -89,7 +85,6 @@ def optimize_meals(df, target_cals, target_p, target_f, target_c, max_servings=2
 st.set_page_config(layout="wide")
 st.title("BU Dining Macro Planner 🍽️")
 
-# Sidebar for inputs
 with st.sidebar:
     st.header("Daily Targets")
     dining_hall = st.selectbox("Select Dining Hall", [
@@ -102,8 +97,7 @@ with st.sidebar:
     carbs = st.number_input("Carbs (g)", value=250)
     
     st.header("Dietary Restrictions")
-    # Natural language exclusion filter
-    exclusions = st.text_input("Exclude ingredients (comma separated)", value="almonds, dairy, fish")
+    exclusions = st.text_input("Exclude ingredients (comma separated)", value="almonds, dairy")
     
 url_map = {
     "Marciano": "https://www.bu.edu/dining/location/marciano/#menu",
@@ -112,24 +106,20 @@ url_map = {
     "Fenway": "https://bufenway.sodexomyway.com/en-us/locations/the-fenway-dining-hall"
 }
 
-# Load and process data
 if st.button("Generate Meal Plan"):
     with st.spinner('Scraping menu and running MILP solver...'):
         menu_df = scrape_dining_hall(url_map[dining_hall])
         
-        # Filter out unwanted items before the math runs
         if exclusions:
             bad_words = [word.strip().lower() for word in exclusions.split(',')]
             for word in bad_words:
                 menu_df = menu_df[~menu_df['Ingredients'].str.contains(word, case=False, na=False)]
                 
-        # Run optimization
         plan_df = optimize_meals(menu_df, cals, protein, fat, carbs)
         
         if not plan_df.empty:
             st.success("Optimal Meal Plan Found!")
             
-            # Display sorted by meal
             for meal in ['Breakfast', 'Lunch', 'Dinner']:
                 st.subheader(meal)
                 meal_data = plan_df[plan_df['Meal'] == meal]
